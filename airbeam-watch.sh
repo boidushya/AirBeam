@@ -4,11 +4,13 @@
 # To disable:  touch ~/.airbeam-pause
 # To re-enable: rm ~/.airbeam-pause
 
+## CONFIGURE THESE FOR YOUR SETUP ##
+# Run `SwitchAudioSource -a` to see all available device names.
+# Set DEVICE to your AirBeam virtual output device name.
+# Add any device you'd intentionally switch to in INTENTIONAL — the script won't override those.
 DEVICE="D6D63AF4F8EF@Bedroom"
 INTERVAL=5
 
-# Devices you'd intentionally choose — the script won't override these.
-# Add any device name exactly as it appears in SwitchAudioSource -a
 INTENTIONAL=(
   "D6D63AF4F8EF@Bedroom"
   "Boidushya's AirPods Pro"
