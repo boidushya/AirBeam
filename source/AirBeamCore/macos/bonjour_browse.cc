@@ -131,12 +131,12 @@ void DNSSD_API BonjourBrowse::ResolveCallback(
 
   port = ntohs(port);
 
-  ContextForAddr* ctx = new ContextForAddr{self, "", fullname, port};
+  ContextForAddr ctx{self, "", fullname, port};
 
   DNSServiceRef addrRef;
   DNSServiceErrorType err = DNSServiceGetAddrInfo(
       &addrRef, 0, interfaceIndex, kDNSServiceProtocol_IPv4, hosttarget,
-      &BonjourBrowse::GetAddrInfoCallback, ctx);
+      &BonjourBrowse::GetAddrInfoCallback, &ctx);
 
   if (err == kDNSServiceErr_NoError) {
     int fd = DNSServiceRefSockFD(addrRef);
@@ -185,7 +185,6 @@ void DNSSD_API BonjourBrowse::GetAddrInfoCallback(
     self->callback_(EventType::kServiceOnline, service_info);
   }
 
-  delete ctx;
 }
 
 std::string BonjourBrowse::extractShortName(const std::string& fullname) {

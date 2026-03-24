@@ -56,7 +56,7 @@ class Raop {
   const uint32_t rtsp_port_;
 
  public:
-  void Start();
+  bool Start();
   void AcceptFrame();
   void SendChunk(const RtpAudioPacketChunk& chunk);
   void SetVolume(uint8_t volume);

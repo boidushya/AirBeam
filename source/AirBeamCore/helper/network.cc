@@ -36,8 +36,10 @@ ErrCode TCPClient::Connect(const std::string& ip, int port) {
   remote_addr.sin_port = htons(port);
   if (inet_pton(AF_INET, ip.c_str(), &remote_addr.sin_addr) <= 0)
     return kErrTcpAddrParse;
-  if (connect(sockfd_, (sockaddr*)&remote_addr, sizeof(remote_addr)) < 0)
+  if (connect(sockfd_, (sockaddr*)&remote_addr, sizeof(remote_addr)) < 0) {
+    ABDebugLog("connect() failed: errno=%d (%s)", errno, strerror(errno));
     return kErrTcpConnect;
+  }
   socklen_t len = sizeof(local_addr);
   getsockname(sockfd_, (sockaddr*)&local_addr, &len);
 

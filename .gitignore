@@ -1,6 +1,13 @@
 /.cache
 /build
 /compile_commands.json
-/*.sh
 /*.log
-!run_airbeam_doctor.sh
+# Allow scripts
+!/run_airbeam_doctor.sh
+!/airbeam-watch.sh
+!/resign_plugin.sh
+!/reinstall.sh
+# Menubar app — track source, not compiled binary/app bundle
+!/AirBeamToggle.swift
+/AirBeamToggle
+/AirBeamToggle.app/

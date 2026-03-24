@@ -141,7 +141,10 @@ void TryChooseService(const std::vector<BonjourBrowse::ServiceInfo>& services,
 void TryRaop(const BonjourBrowse::ServiceInfo& service,
              const std::string& audio_pcm_path) {
   Raop raop(service.ip, service.port);
-  raop.Start();
+  if (!raop.Start()) {
+    LOG(ERROR) << "Failed to connect to " << service.ip << ":" << service.port;
+    return;
+  }
   raop.SetVolume(30);
 
   LOG(INFO) << "Service Connected";

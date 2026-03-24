@@ -4,7 +4,7 @@ set -xe
 ROOT_DIR=$(dirname "$0")
 
 rm -rf ./build
-cmake -S . -B build -GNinja
+cmake -S . -B build -GNinja -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 cmake --build build --target AirBeamDoctor
 
 ${ROOT_DIR}/build/source/AirBeamDoctor/AirBeamDoctor --audio_pcm ${ROOT_DIR}/resources/audio.pcm --log ${ROOT_DIR}/mylog.log

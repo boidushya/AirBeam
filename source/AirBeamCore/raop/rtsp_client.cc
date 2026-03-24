@@ -17,13 +17,13 @@ int RTSPClient::DoRequest(const RtspReqMessage& request,
   ABDebugLog("RTSPClient::DoRequestBegin\n%s", request.ToString().c_str());
 
   int ret = helper::TCPClient::Write(request.ToString());
-  if (ret < 0) {
+  if (ret != helper::kOk) {
     return ret;
   }
 
   std::string buffer;
   ret = helper::TCPClient::Read(buffer);
-  if (ret < 0) {
+  if (ret != helper::kOk) {
     return ret;
   }
   auto response_msg = RtspMessage::Parse(buffer);

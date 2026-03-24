@@ -29,11 +29,11 @@ namespace raop {
 
 using namespace helper;
 
-void Raop::Start() {
+bool Raop::Start() {
   int ret = rtsp_client_.Connect(rtsp_ip_addr_, rtsp_port_);
   if (ret != kOk) {
     ABDebugLog("rtsp_client_.Connect failed, ret=%d", ret);
-    return;
+    return false;
   }
 
   GenerateID();
@@ -49,6 +49,7 @@ void Raop::Start() {
         static_cast<uint32_t>(helper::RandomGenerator::GetInstance().GenU64());
   }
   is_started_ = true;
+  return true;
 }
 
 void Raop::AcceptFrame() {
