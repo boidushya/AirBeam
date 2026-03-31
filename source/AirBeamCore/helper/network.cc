@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -37,6 +38,10 @@ ErrCode TCPClient::Connect(const std::string& ip, int port) {
   remote_addr.sin_port = htons(port);
   if (inet_pton(AF_INET, ip.c_str(), &remote_addr.sin_addr) <= 0)
     return kErrTcpAddrParse;
+  // Disable Nagle's algorithm so RTSP control messages are sent immediately
+  int nodelay = 1;
+  setsockopt(sockfd_, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+
   if (connect(sockfd_, (sockaddr*)&remote_addr, sizeof(remote_addr)) < 0) {
     ABDebugLog("connect() failed: errno=%d (%s)", errno, strerror(errno));
     return kErrTcpConnect;
@@ -115,15 +120,24 @@ ErrCode UDPServer::Bind() {
 }
 
 ErrCode UDPServer::Write(const NetAddr& remote_addr, const std::string& data) {
-  if (sockfd_ < 0) return kErrUdpSocketCreate;
   sockaddr_in dest{};
-  dest.sin_family = AF_INET;
-  dest.sin_port = htons(remote_addr.port_);
-  if (inet_pton(AF_INET, remote_addr.ip_.c_str(), &dest.sin_addr) <= 0)
-    return kErrUdpAddrParse;
-  ssize_t sent = sendto(sockfd_, data.data(), data.size(), 0, (sockaddr*)&dest,
-                        sizeof(dest));
+  if (!ResolveAddr(remote_addr, dest)) return kErrUdpAddrParse;
+  return WriteTo(dest, data.data(), data.size());
+}
+
+ErrCode UDPServer::WriteTo(const sockaddr_in& dest, const void* data,
+                           size_t len) {
+  if (sockfd_ < 0) return kErrUdpSocketCreate;
+  ssize_t sent =
+      sendto(sockfd_, data, len, 0, (const sockaddr*)&dest, sizeof(dest));
   return sent < 0 ? kErrUdpSend : kOk;
+}
+
+bool UDPServer::ResolveAddr(const NetAddr& addr, sockaddr_in& out) {
+  memset(&out, 0, sizeof(out));
+  out.sin_family = AF_INET;
+  out.sin_port = htons(addr.port_);
+  return inet_pton(AF_INET, addr.ip_.c_str(), &out.sin_addr) > 0;
 }
 
 ErrCode UDPServer::Read(NetAddr& remote_addr, std::string& data) {

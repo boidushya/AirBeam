@@ -41,6 +41,7 @@ class Raop {
   helper::NetAddr remote_audio_addr_;
   helper::NetAddr remote_time_addr_;
   helper::NetAddr remote_ctrl_addr_;
+  sockaddr_in resolved_audio_addr_{};
 
   std::string sid_;
   std::string sci_;
@@ -63,7 +64,6 @@ class Raop {
   double ns_to_mach_ = 1.0;
 
   std::vector<uint8_t> send_buffer_;
-  std::string send_data_;
 
   static constexpr size_t kRetransmitBufferSize = 512;
   std::array<std::string, kRetransmitBufferSize> retransmit_buffer_;

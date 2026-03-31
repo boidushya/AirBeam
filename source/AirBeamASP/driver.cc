@@ -67,7 +67,12 @@ class RaopHandler : public aspl::ControlRequestHandler,
   void OnWriteMixedOutput(const std::shared_ptr<aspl::Stream>& stream,
                           Float64 zeroTimestamp, Float64 timestamp,
                           const void* buff, UInt32 buffBytesSize) override {
-    fifo_.Write(reinterpret_cast<const uint8_t*>(buff), buffBytesSize);
+    // Use a short timeout so we never block the CoreAudio real-time thread.
+    // If the FIFO is full (consumer can't keep up), drop samples rather than
+    // stalling the entire audio pipeline — a brief dropout is better than a
+    // system-wide audio freeze.
+    fifo_.Write(reinterpret_cast<const uint8_t*>(buff), buffBytesSize,
+                std::chrono::milliseconds(5));
   }
 
  public:

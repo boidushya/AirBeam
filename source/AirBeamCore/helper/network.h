@@ -41,6 +41,9 @@ class UDPServer {
 
   ErrCode Bind();
   ErrCode Write(const NetAddr& remote_addr, const std::string& data);
+  // Fast path: send to a pre-resolved address (no inet_pton per call)
+  ErrCode WriteTo(const sockaddr_in& dest, const void* data, size_t len);
+  static bool ResolveAddr(const NetAddr& addr, sockaddr_in& out);
   ErrCode Read(NetAddr& remote_addr, std::string& data);
   const NetAddr& GetLocalNetAddr() { return local_addr_; };
   void Close();

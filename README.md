@@ -29,6 +29,9 @@ This fork fixes those bugs and adds convenience tooling (auto-switch script, men
 - **Pre-allocated send buffers** - eliminated ~250 heap allocations/sec from the audio hot path
 - **Real-time thread priority** - audio consumer thread now runs with macOS `THREAD_TIME_CONSTRAINT_POLICY` to prevent scheduling delays
 - **UDP socket optimization** - increased send buffer (256KB) and DSCP Expedited Forwarding marking so routers prioritize audio packets over bulk traffic
+- **Zero-copy send path** - audio packets are sent directly from the serialization buffer with a pre-resolved socket address, eliminating per-packet `inet_pton` calls and string copies
+- **Non-blocking HAL writes** - the CoreAudio real-time callback no longer blocks indefinitely if the FIFO is full, preventing system-wide audio freezes
+- **TCP_NODELAY on RTSP** - disabled Nagle's algorithm so keepalive and volume control messages are sent immediately instead of being buffered
 
 ### Stability Improvements
 

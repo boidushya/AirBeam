@@ -92,18 +92,19 @@ void Raop::PrepareChunk(const RtpAudioPacketChunk& chunk) {
   first_pkt_ = false;
   send_buffer_.clear();
   packet.Serialize(send_buffer_);
-  send_data_.assign(reinterpret_cast<const char*>(send_buffer_.data()),
-                    send_buffer_.size());
 
   {
     std::lock_guard<std::mutex> lock(retransmit_mutex_);
-    retransmit_buffer_[status_.seq_number % kRetransmitBufferSize] = send_data_;
+    auto& slot = retransmit_buffer_[status_.seq_number % kRetransmitBufferSize];
+    slot.assign(reinterpret_cast<const char*>(send_buffer_.data()),
+                send_buffer_.size());
   }
 }
 
 void Raop::SendPreparedChunk() {
   if (!is_started_) return;
-  int ret = audio_server_.Write(remote_audio_addr_, send_data_);
+  int ret = audio_server_.WriteTo(resolved_audio_addr_, send_buffer_.data(),
+                                  send_buffer_.size());
   if (ret != kOk) {
     ABDebugLog("audio_server_.Write failed, ret=%d", ret);
   }
@@ -279,6 +280,9 @@ bool Raop::Setup() {
   remote_audio_addr_.ip_ = rtsp_client_.GetRemoteNetAddr().ip_;
   remote_ctrl_addr_.ip_ = rtsp_client_.GetRemoteNetAddr().ip_;
   remote_time_addr_.ip_ = rtsp_client_.GetRemoteNetAddr().ip_;
+
+  // Pre-resolve audio destination so SendPreparedChunk avoids inet_pton
+  helper::UDPServer::ResolveAddr(remote_audio_addr_, resolved_audio_addr_);
   return true;
 }
 
