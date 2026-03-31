@@ -2,6 +2,9 @@
 
 #include "fifo.h"
 
+#include <algorithm>
+#include <cstring>
+
 namespace AirBeamCore {
 namespace raop {
 size_t ConcurrentByteFIFO::Write(const uint8_t* data, size_t length,
@@ -23,9 +26,17 @@ size_t ConcurrentByteFIFO::Write(const uint8_t* data, size_t length,
       break;
     }
 
-    buffer_[head_] = data[written++];
-    head_ = (head_ + 1) % capacity_;
-    ++size_;
+    size_t available = capacity_ - size_;
+    size_t to_write = std::min(length - written, available);
+    size_t first_chunk = std::min(to_write, capacity_ - head_);
+    memcpy(buffer_.data() + head_, data + written, first_chunk);
+    if (to_write > first_chunk) {
+      memcpy(buffer_.data(), data + written + first_chunk,
+             to_write - first_chunk);
+    }
+    head_ = (head_ + to_write) % capacity_;
+    size_ += to_write;
+    written += to_write;
     lock.unlock();
     not_empty_cv_.notify_one();
   }
@@ -51,9 +62,17 @@ size_t ConcurrentByteFIFO::Read(uint8_t* data, size_t length,
       break;
     }
 
-    data[read_count++] = buffer_[tail_];
-    tail_ = (tail_ + 1) % capacity_;
-    --size_;
+    size_t available = size_;
+    size_t to_read = std::min(length - read_count, available);
+    size_t first_chunk = std::min(to_read, capacity_ - tail_);
+    memcpy(data + read_count, buffer_.data() + tail_, first_chunk);
+    if (to_read > first_chunk) {
+      memcpy(data + read_count + first_chunk, buffer_.data(),
+             to_read - first_chunk);
+    }
+    tail_ = (tail_ + to_read) % capacity_;
+    size_ -= to_read;
+    read_count += to_read;
     lock.unlock();
     not_full_cv_.notify_one();
   }

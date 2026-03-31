@@ -5,7 +5,9 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+#include <array>
 #include <atomic>
+#include <mutex>
 #include <string>
 
 #include "helper/network.h"
@@ -55,6 +57,13 @@ class Raop {
   const std::string rtsp_ip_addr_;
   const uint32_t rtsp_port_;
 
+  std::vector<uint8_t> send_buffer_;
+  std::string send_data_;
+
+  static constexpr size_t kRetransmitBufferSize = 512;
+  std::array<std::string, kRetransmitBufferSize> retransmit_buffer_;
+  std::mutex retransmit_mutex_;
+
  public:
   bool Start();
   void AcceptFrame();
@@ -70,6 +79,7 @@ class Raop {
   void SyncStart();
   void KeepAlive();
   void FirstSendSync();
+  void RetransmitPackets(uint16_t seq_start, uint16_t count);
 };
 }  // namespace raop
 }  // namespace AirBeamCore

@@ -58,11 +58,8 @@ void Raop::AcceptFrame() {
   uint64_t now_ts = now.IntoTimestamp(kSampleRate44100);
   if (now_ts < (status_.head_ts + kPCMChunkLength)) {
     uint64_t sleep_frames = (status_.head_ts + kPCMChunkLength) - now_ts;
-    auto sleep_duration =
-        std::chrono::seconds(sleep_frames / kSampleRate44100) +
-        std::chrono::nanoseconds(static_cast<uint32_t>(
-            (sleep_frames % kSampleRate44100) *
-            static_cast<uint64_t>(UINT32_MAX) / (kSampleRate44100 - 1)));
+    auto sleep_duration = std::chrono::nanoseconds(
+        sleep_frames * 1'000'000'000ULL / kSampleRate44100);
     std::this_thread::sleep_for(sleep_duration);
   }
 }
@@ -78,13 +75,17 @@ void Raop::SendChunk(const RtpAudioPacketChunk& chunk) {
   packet.ssrc = ssrc_;
   packet.data = chunk;
   first_pkt_ = false;
-  std::vector<uint8_t> buffer;
-  packet.Serialize(buffer);
-  std::string data;
-  data.resize(buffer.size());
-  memcpy(const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(data.c_str())),
-         buffer.data(), buffer.size());
-  int ret = audio_server_.Write(remote_audio_addr_, data);
+  send_buffer_.clear();
+  packet.Serialize(send_buffer_);
+  send_data_.assign(reinterpret_cast<const char*>(send_buffer_.data()),
+                    send_buffer_.size());
+
+  {
+    std::lock_guard<std::mutex> lock(retransmit_mutex_);
+    retransmit_buffer_[status_.seq_number % kRetransmitBufferSize] = send_data_;
+  }
+
+  int ret = audio_server_.Write(remote_audio_addr_, send_data_);
   if (ret != kOk) {
     ABDebugLog("audio_server_.Write failed, ret=%d", ret);
     exit(-1);
@@ -312,6 +313,31 @@ void Raop::Record() {
   }
 }
 
+void Raop::RetransmitPackets(uint16_t seq_start, uint16_t count) {
+  std::lock_guard<std::mutex> lock(retransmit_mutex_);
+  for (uint16_t i = 0; i < count; ++i) {
+    uint16_t seq = seq_start + i;
+    const auto& pkt_data =
+        retransmit_buffer_[seq % kRetransmitBufferSize];
+    if (pkt_data.empty()) continue;
+
+    // AirPlay retransmit: 4-byte header (0x80, 0xD6, original seq) + original
+    // packet
+    std::string retransmit_pkt;
+    retransmit_pkt.resize(4 + pkt_data.size());
+    retransmit_pkt[0] = static_cast<char>(0x80);
+    retransmit_pkt[1] = static_cast<char>(0xD6);
+    retransmit_pkt[2] = static_cast<char>((seq >> 8) & 0xFF);
+    retransmit_pkt[3] = static_cast<char>(seq & 0xFF);
+    memcpy(&retransmit_pkt[4], pkt_data.data(), pkt_data.size());
+
+    int ret = ctrl_server_.Write(remote_ctrl_addr_, retransmit_pkt);
+    if (ret != kOk) {
+      ABDebugLog("retransmit failed for seq=%u, ret=%d", seq, ret);
+    }
+  }
+}
+
 void Raop::SyncStart() {
   (new std::thread([this]() {
     NetAddr ctrl_remote_addr;
@@ -325,6 +351,9 @@ void Raop::SyncStart() {
       }
       auto recv_pkt = RtpLostPacket::Deserialize(
           reinterpret_cast<uint8_t*>(buffer.data()), buffer.size());
+      if (recv_pkt.n > 0) {
+        RetransmitPackets(recv_pkt.seq_number, recv_pkt.n);
+      }
     }
   }))->detach();
   (new std::thread([this]() {

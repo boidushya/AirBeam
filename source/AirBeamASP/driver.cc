@@ -11,6 +11,11 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_policy.h>
+#include <pthread.h>
+
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -82,6 +87,24 @@ class RaopHandler : public aspl::ControlRequestHandler,
 
     raop_->Start();
     consumer_thread_ = std::make_unique<std::thread>([&]() {
+      // Elevate to real-time priority so audio packets aren't delayed by
+      // scheduling. Period values are in Mach absolute time units (nanoseconds
+      // on Apple Silicon).
+      mach_timebase_info_data_t timebase;
+      mach_timebase_info(&timebase);
+      // One audio chunk = 352 frames / 44100 Hz ≈ 7.98ms
+      uint32_t chunk_ns = 352 * 1'000'000'000U / SampleRate;
+      uint32_t chunk_abs =
+          chunk_ns * timebase.denom / timebase.numer;  // ns → abs time
+      thread_time_constraint_policy_data_t policy;
+      policy.period = chunk_abs;
+      policy.computation = chunk_abs / 4;  // 2ms compute budget
+      policy.constraint = chunk_abs / 2;   // 4ms hard deadline
+      policy.preemptible = 1;
+      thread_policy_set(mach_thread_self(), THREAD_TIME_CONSTRAINT_POLICY,
+                        reinterpret_cast<thread_policy_t>(&policy),
+                        THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+
       while (true) {
         RtpAudioPacketChunk chunk, encoded;
         size_t read_cnt = fifo_.Read(chunk.data_, sizeof(chunk.data_));
