@@ -19,6 +19,21 @@ This fork fixes those bugs and adds convenience tooling (auto-switch script, men
 - AirBeamDoctor crash when the HomePod can't be reached
 - Missing error details when TCP connections fail
 
+### Audio Quality Improvements
+
+- **Bulk FIFO buffer** - replaced byte-by-byte audio buffer (1,408 lock/unlock cycles per chunk) with bulk `memcpy` operations (~1 lock per chunk), reducing mutex contention by ~1000x
+- **Precision timing** - replaced imprecise `sleep_for` (~1ms granularity) with `mach_wait_until` for sub-microsecond packet scheduling, and fixed a bug where the original sleep calculation was ~4.3x too long
+- **Gradual drift correction** - instead of hard clock resets that cause audible clicks, timing drift is corrected smoothly at 5% per chunk
+- **Lost packet retransmission** - HomePod requests for missed packets were silently ignored; now retransmitted from a 512-packet ring buffer
+- **Atomic timestamp access** - fixed a data race between the audio consumer thread and sync thread that caused clicks during idle/silence
+- **Pre-allocated send buffers** - eliminated ~250 heap allocations/sec from the audio hot path
+- **Real-time thread priority** - audio consumer thread now runs with macOS `THREAD_TIME_CONSTRAINT_POLICY` to prevent scheduling delays
+- **UDP socket optimization** - increased send buffer (256KB) and DSCP Expedited Forwarding marking so routers prioritize audio packets over bulk traffic
+
+### Stability Improvements
+
+- **Removed all 18 `exit(-1)` calls** - the original code killed `coreaudiod` on any transient network error (Wi-Fi blip, slow HomePod response). Now startup failures return errors gracefully, background threads retry on transient errors, and the audio hot path logs and continues
+
 ## Prerequisites
 
 Before you start, make sure you have the following installed:

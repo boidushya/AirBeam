@@ -4,6 +4,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -94,6 +95,15 @@ ErrCode UDPServer::Bind() {
   socklen_t addr_len = sizeof(local_addr);
   if (getsockname(sockfd_, (sockaddr*)&local_addr, &addr_len) < 0)
     return kErrGetsockName;
+
+  // Increase send buffer to handle micro-bursts without dropping packets
+  int sndbuf = 256 * 1024;  // 256KB
+  setsockopt(sockfd_, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+
+  // Mark packets as real-time audio (DSCP Expedited Forwarding = 0xB8)
+  // so routers/switches prioritize them over bulk traffic
+  int tos = 0xB8;
+  setsockopt(sockfd_, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
 
   char ip[INET_ADDRSTRLEN];
   inet_ntop(AF_INET, &local_addr.sin_addr, ip, sizeof(ip));
