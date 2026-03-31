@@ -37,13 +37,13 @@ bool Raop::Start() {
   }
 
   GenerateID();
-  Announce();
-  BindCtrlAndTimePort();
-  Setup();
-  Record();
+  if (!Announce()) return false;
+  if (!BindCtrlAndTimePort()) return false;
+  if (!Setup()) return false;
+  if (!Record()) return false;
   SyncStart();
   KeepAlive();
-  FirstSendSync();
+  if (!FirstSendSync()) return false;
   {
     ssrc_ =
         static_cast<uint32_t>(helper::RandomGenerator::GetInstance().GenU64());
@@ -54,24 +54,39 @@ bool Raop::Start() {
 
 void Raop::AcceptFrame() {
   if (!is_started_) return;
-  auto now = NtpTime::Now();
-  uint64_t now_ts = now.IntoTimestamp(kSampleRate44100);
-  if (now_ts < (status_.head_ts + kPCMChunkLength)) {
-    uint64_t sleep_frames = (status_.head_ts + kPCMChunkLength) - now_ts;
-    auto sleep_duration = std::chrono::nanoseconds(
-        sleep_frames * 1'000'000'000ULL / kSampleRate44100);
-    std::this_thread::sleep_for(sleep_duration);
+
+  // Calculate the absolute Mach time when this chunk should be sent, based on
+  // how many frames we've sent since start.
+  uint64_t head = status_.head_ts.load(std::memory_order_relaxed);
+  uint64_t first = status_.first_ts.load(std::memory_order_relaxed);
+  uint64_t frames_since_start = head - first;
+  double target_ns =
+      static_cast<double>(frames_since_start) * 1'000'000'000.0 / kSampleRate44100;
+  uint64_t target_mach = start_mach_time_ +
+                         static_cast<uint64_t>(target_ns * ns_to_mach_);
+
+  uint64_t now = mach_absolute_time();
+
+  if (now < target_mach) {
+    // Wait with sub-microsecond precision
+    mach_wait_until(target_mach);
+  } else if (now > target_mach) {
+    // We're behind schedule. Instead of hard-resetting (which causes clicks),
+    // gradually nudge the clock reference to catch up smoothly.
+    // Correct 5% of the error per chunk — full correction in ~160ms.
+    int64_t error = static_cast<int64_t>(now - target_mach);
+    start_mach_time_ += error / 20;
   }
 }
 
-void Raop::SendChunk(const RtpAudioPacketChunk& chunk) {
+void Raop::PrepareChunk(const RtpAudioPacketChunk& chunk) {
   if (!is_started_) return;
   status_.seq_number += 1;
   RtpAudioPacket packet;
   packet.header.proto = 0x80;
   packet.header.type = first_pkt_ ? 0xE0 : 0x60;
   packet.header.seq = status_.seq_number;
-  packet.timestamp = status_.head_ts;
+  packet.timestamp = status_.head_ts.load(std::memory_order_relaxed);
   packet.ssrc = ssrc_;
   packet.data = chunk;
   first_pkt_ = false;
@@ -84,14 +99,15 @@ void Raop::SendChunk(const RtpAudioPacketChunk& chunk) {
     std::lock_guard<std::mutex> lock(retransmit_mutex_);
     retransmit_buffer_[status_.seq_number % kRetransmitBufferSize] = send_data_;
   }
+}
 
+void Raop::SendPreparedChunk() {
+  if (!is_started_) return;
   int ret = audio_server_.Write(remote_audio_addr_, send_data_);
   if (ret != kOk) {
     ABDebugLog("audio_server_.Write failed, ret=%d", ret);
-    exit(-1);
-    return;
   }
-  status_.head_ts += kPCMChunkLength;
+  status_.head_ts.fetch_add(kPCMChunkLength, std::memory_order_relaxed);
 }
 
 void Raop::SetVolume(uint8_t volume_percent) {
@@ -115,9 +131,7 @@ void Raop::SetVolume(uint8_t volume_percent) {
   RtspRespMessage response;
   int ret = rtsp_client_.DoRequest(request, response);
   if (ret != kOk) {
-    ABDebugLog("rtsp_client_.DoRequest failed, ret=%d", ret);
-    exit(-1);
-    return;
+    ABDebugLog("SetVolume: rtsp_client_.DoRequest failed, ret=%d", ret);
   }
 }
 
@@ -128,7 +142,7 @@ void Raop::GenerateID() {
   sci_ = helper::RandomGenerator::GetInstance().GenHexStr(kSciLen);
 }
 
-void Raop::Announce() {
+bool Raop::Announce() {
   std::string uri = fmt::format("rtsp://{}/{}", rtsp_ip_addr_, sid_);
 
   std::vector<std::tuple<std::string, std::string>> sdp_map = {
@@ -156,25 +170,23 @@ void Raop::Announce() {
   RtspRespMessage response;
   int ret = rtsp_client_.DoRequest(request, response);
   if (ret != kOk) {
-    ABDebugLog("rtsp_client_.DoRequest failed, ret=%d", ret);
-    exit(-1);
-    return;
+    ABDebugLog("Announce: rtsp_client_.DoRequest failed, ret=%d", ret);
+    return false;
   }
+  return true;
 }
 
-void Raop::BindCtrlAndTimePort() {
+bool Raop::BindCtrlAndTimePort() {
   int ret = 0;
   ret = ctrl_server_.Bind();
   if (ret != kOk) {
-    ABDebugLog("ctrl_server_.Bind, ret=%d", ret);
-    exit(-1);
-    return;
+    ABDebugLog("ctrl_server_.Bind failed, ret=%d", ret);
+    return false;
   }
   ret = time_server_.Bind();
   if (ret != kOk) {
-    ABDebugLog("time_server_.Bind, ret=%d", ret);
-    exit(-1);
-    return;
+    ABDebugLog("time_server_.Bind failed, ret=%d", ret);
+    return false;
   }
   (new std::thread([&]() {
     helper::NetAddr remote_addr;
@@ -185,8 +197,7 @@ void Raop::BindCtrlAndTimePort() {
       int ret = time_server_.Read(remote_addr, data);
       if (ret != kOk) {
         ABDebugLog("time_server_.Read failed, ret=%d", ret);
-        exit(-1);
-        return;
+        continue;
       }
       memcpy(buffer, data.data(), data.size());
       auto recv_pkt = RtpTimePacket::Deserialize(buffer, data.size());
@@ -205,19 +216,18 @@ void Raop::BindCtrlAndTimePort() {
       ret = time_server_.Write(remote_addr, data);
       if (ret != kOk) {
         ABDebugLog("time_server_.Write failed, ret=%d", ret);
-        exit(-1);
-        return;
       }
     }
   }))->detach();
   ret = audio_server_.Bind();
   if (ret != kOk) {
     ABDebugLog("audio_server_.Bind failed, ret=%d", ret);
-    exit(-1);
+    return false;
   }
+  return true;
 }
 
-void Raop::Setup() {
+bool Raop::Setup() {
   int ret = 0;
 
   ABDebugLog("Raop::Setup ctrl server port =%d",
@@ -245,37 +255,34 @@ void Raop::Setup() {
   RtspRespMessage response;
   ret = rtsp_client_.DoRequest(request, response);
   if (ret != kOk) {
-    ABDebugLog("rtsp_client_.DoRequest failed, ret=%d", ret);
-    exit(-1);
-    return;
+    ABDebugLog("Setup: rtsp_client_.DoRequest failed, ret=%d", ret);
+    return false;
   }
 
   auto transport_map = ParseKVStr(response.GetHeader("Transport"), "=", ";");
   if (!absl::SimpleAtoi(transport_map["server_port"],
                         &remote_audio_addr_.port_)) {
-    ABDebugLog("absl::SimpleAtoi(transport_map[\"server_port\"], ...) failed");
-    exit(-1);
-    return;
+    ABDebugLog("Setup: failed to parse server_port");
+    return false;
   }
   if (!absl::SimpleAtoi(transport_map["control_port"],
                         &remote_ctrl_addr_.port_)) {
-    ABDebugLog("absl::SimpleAtoi(transport_map[\"control_port\"], ...) failed");
-    exit(-1);
-    return;
+    ABDebugLog("Setup: failed to parse control_port");
+    return false;
   }
   if (!absl::SimpleAtoi(transport_map["timing_port"],
                         &remote_time_addr_.port_)) {
-    ABDebugLog("absl::SimpleAtoi(transport_map[\"timing_port\"], ...) failed");
-    exit(-1);
-    return;
+    ABDebugLog("Setup: failed to parse timing_port");
+    return false;
   }
 
   remote_audio_addr_.ip_ = rtsp_client_.GetRemoteNetAddr().ip_;
   remote_ctrl_addr_.ip_ = rtsp_client_.GetRemoteNetAddr().ip_;
   remote_time_addr_.ip_ = rtsp_client_.GetRemoteNetAddr().ip_;
+  return true;
 }
 
-void Raop::Record() {
+bool Raop::Record() {
   uint64_t start_seq = status_.seq_number++;
   uint64_t start_ts = NtpTime::Now().IntoTimestamp(kSampleRate44100);
   std::string uri = fmt::format("rtsp://{}/{}", rtsp_ip_addr_, sid_);
@@ -300,17 +307,14 @@ void Raop::Record() {
   RtspRespMessage response;
   int ret = rtsp_client_.DoRequest(request, response);
   if (ret != kOk) {
-    ABDebugLog("rtsp_client_.DoRequest failed, ret=%d", ret);
-    exit(-1);
-    return;
+    ABDebugLog("Record: rtsp_client_.DoRequest failed, ret=%d", ret);
+    return false;
   }
-  response.GetHeader("Audio-Latency");
   if (!absl::SimpleAtoi(response.GetHeader("Audio-Latency"), &latency_)) {
-    ABDebugLog(
-        "absl::SimpleAtoi(response.GetHeader(\"Audio-Latency\"), ...) failed");
-    exit(-1);
-    return;
+    ABDebugLog("Record: failed to parse Audio-Latency");
+    return false;
   }
+  return true;
 }
 
 void Raop::RetransmitPackets(uint16_t seq_start, uint16_t count) {
@@ -346,8 +350,7 @@ void Raop::SyncStart() {
       int ret = ctrl_server_.Read(ctrl_remote_addr, buffer);
       if (ret != kOk) {
         ABDebugLog("ctrl_server_.Read failed, ret=%d", ret);
-        exit(-1);
-        return;
+        continue;
       }
       auto recv_pkt = RtpLostPacket::Deserialize(
           reinterpret_cast<uint8_t*>(buffer.data()), buffer.size());
@@ -358,8 +361,9 @@ void Raop::SyncStart() {
   }))->detach();
   (new std::thread([this]() {
     while (true) {
-      auto rsp = RtpSyncPacket::Build(status_.head_ts, kSampleRate44100,
-                                      latency_, false);
+      auto rsp = RtpSyncPacket::Build(
+          status_.head_ts.load(std::memory_order_relaxed), kSampleRate44100,
+          latency_, false);
       uint8_t buffer[sizeof(RtpSyncPacket)];
       rsp.Serialize(buffer);
       std::string data;
@@ -368,8 +372,6 @@ void Raop::SyncStart() {
       int ret = ctrl_server_.Write(remote_ctrl_addr_, data);
       if (ret != kOk) {
         ABDebugLog("ctrl_server_.Write failed, ret=%d", ret);
-        exit(-1);
-        return;
       }
       std::this_thread::sleep_for(std::chrono::seconds(1));
     }
@@ -392,20 +394,24 @@ void Raop::KeepAlive() {
       RtspRespMessage response;
       int ret = rtsp_client_.DoRequest(request, response);
       if (ret != kOk) {
-        ABDebugLog("rtsp_client_.DoRequest failed, ret=%d", ret);
-        exit(-1);
-        return;
+        ABDebugLog("KeepAlive: rtsp_client_.DoRequest failed, ret=%d", ret);
       }
     }
   }))->detach();
 }
 
-void Raop::FirstSendSync() {
+bool Raop::FirstSendSync() {
+  // Initialize Mach absolute time conversion factors
+  mach_timebase_info_data_t timebase;
+  mach_timebase_info(&timebase);
+  mach_to_ns_ = static_cast<double>(timebase.numer) / timebase.denom;
+  ns_to_mach_ = static_cast<double>(timebase.denom) / timebase.numer;
+
   uint64_t now_ts = NtpTime::Now().IntoTimestamp(kSampleRate44100);
-  status_.head_ts = now_ts;
-  status_.first_ts = status_.head_ts;
-  auto pkt =
-      RtpSyncPacket::Build(status_.head_ts, kSampleRate44100, latency_, true);
+  status_.head_ts.store(now_ts, std::memory_order_relaxed);
+  status_.first_ts.store(now_ts, std::memory_order_relaxed);
+  start_mach_time_ = mach_absolute_time();
+  auto pkt = RtpSyncPacket::Build(now_ts, kSampleRate44100, latency_, true);
   uint8_t buffer[sizeof(RtpSyncPacket)];
   pkt.Serialize(buffer);
   std::string data;
@@ -414,10 +420,10 @@ void Raop::FirstSendSync() {
   int ret = ctrl_server_.Write(remote_ctrl_addr_, data);
   ABDebugLog("ctrl_server_.Write,len=%lu", data.size());
   if (ret != kOk) {
-    ABDebugLog("ctrl_server_.Write failed, ret=%d", ret);
-    exit(-1);
-    return;
+    ABDebugLog("FirstSendSync: ctrl_server_.Write failed, ret=%d", ret);
+    return false;
   }
+  return true;
 }
 }  // namespace raop
 

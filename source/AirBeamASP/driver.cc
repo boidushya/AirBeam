@@ -116,8 +116,9 @@ class RaopHandler : public aspl::ControlRequestHandler,
         PCMCodec::Encode(chunk, encoded);
         encoded.len_ = chunk.len_;
 
+        raop_->PrepareChunk(encoded);
         raop_->AcceptFrame();
-        raop_->SendChunk(encoded);
+        raop_->SendPreparedChunk();
       }
     });
     consumer_thread_->detach();

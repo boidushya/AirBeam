@@ -2,6 +2,7 @@
 
 #pragma once
 #include <arpa/inet.h>
+#include <mach/mach_time.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 
@@ -21,8 +22,8 @@ struct RaopStatus {
  public:
   std::atomic<uint16_t> seq_number =
       std::atomic<uint16_t>(helper::RandomGenerator::GetInstance().GenU64());
-  uint64_t head_ts = 0;
-  uint64_t first_ts = 0;
+  std::atomic<uint64_t> head_ts = 0;
+  std::atomic<uint64_t> first_ts = 0;
 };
 
 class Raop {
@@ -57,6 +58,10 @@ class Raop {
   const std::string rtsp_ip_addr_;
   const uint32_t rtsp_port_;
 
+  uint64_t start_mach_time_ = 0;
+  double mach_to_ns_ = 1.0;
+  double ns_to_mach_ = 1.0;
+
   std::vector<uint8_t> send_buffer_;
   std::string send_data_;
 
@@ -67,18 +72,19 @@ class Raop {
  public:
   bool Start();
   void AcceptFrame();
-  void SendChunk(const RtpAudioPacketChunk& chunk);
+  void PrepareChunk(const RtpAudioPacketChunk& chunk);
+  void SendPreparedChunk();
   void SetVolume(uint8_t volume);
 
  private:
   void GenerateID();
-  void Announce();
-  void BindCtrlAndTimePort();
-  void Setup();
-  void Record();
+  bool Announce();
+  bool BindCtrlAndTimePort();
+  bool Setup();
+  bool Record();
   void SyncStart();
   void KeepAlive();
-  void FirstSendSync();
+  bool FirstSendSync();
   void RetransmitPackets(uint16_t seq_start, uint16_t count);
 };
 }  // namespace raop
