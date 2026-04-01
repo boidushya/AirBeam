@@ -15,6 +15,7 @@
 #include <mach/mach_time.h>
 #include <mach/thread_policy.h>
 #include <pthread.h>
+#include <syslog.h>
 
 #include <chrono>
 #include <memory>
@@ -67,12 +68,13 @@ class RaopHandler : public aspl::ControlRequestHandler,
   void OnWriteMixedOutput(const std::shared_ptr<aspl::Stream>& stream,
                           Float64 zeroTimestamp, Float64 timestamp,
                           const void* buff, UInt32 buffBytesSize) override {
-    // Use a short timeout so we never block the CoreAudio real-time thread.
-    // If the FIFO is full (consumer can't keep up), drop samples rather than
-    // stalling the entire audio pipeline — a brief dropout is better than a
-    // system-wide audio freeze.
-    fifo_.Write(reinterpret_cast<const uint8_t*>(buff), buffBytesSize,
-                std::chrono::milliseconds(5));
+    size_t written = fifo_.Write(reinterpret_cast<const uint8_t*>(buff),
+                                 buffBytesSize, std::chrono::milliseconds(5));
+    if (written < buffBytesSize) {
+      syslog(LOG_WARNING,
+             "[AirBeam] FIFO DROP: wrote %zu/%u bytes (FIFO full)",
+             written, buffBytesSize);
+    }
   }
 
  public:
@@ -92,19 +94,17 @@ class RaopHandler : public aspl::ControlRequestHandler,
 
     raop_->Start();
     consumer_thread_ = std::make_unique<std::thread>([&]() {
-      // Elevate to real-time priority so audio packets aren't delayed by
-      // scheduling. Period values are in Mach absolute time units (nanoseconds
-      // on Apple Silicon).
+      // Real-time constraint with accurate budget. The FIFO read blocks
+      // (off-CPU, doesn't count as computation). Actual on-CPU work per
+      // chunk is ~200μs (encode + serialize + send).
       mach_timebase_info_data_t timebase;
       mach_timebase_info(&timebase);
-      // One audio chunk = 352 frames / 44100 Hz ≈ 7.98ms
-      uint32_t chunk_ns = 352 * 1'000'000'000U / SampleRate;
-      uint32_t chunk_abs =
-          chunk_ns * timebase.denom / timebase.numer;  // ns → abs time
+      uint32_t chunk_ns = 352 * 1'000'000'000U / SampleRate;  // ~8ms
+      uint32_t chunk_abs = chunk_ns * timebase.denom / timebase.numer;
       thread_time_constraint_policy_data_t policy;
-      policy.period = chunk_abs;
-      policy.computation = chunk_abs / 4;  // 2ms compute budget
-      policy.constraint = chunk_abs / 2;   // 4ms hard deadline
+      policy.period = chunk_abs;          // 8ms period
+      policy.computation = chunk_abs;     // allow full period on-CPU
+      policy.constraint = chunk_abs;      // same as period
       policy.preemptible = 1;
       thread_policy_set(mach_thread_self(), THREAD_TIME_CONSTRAINT_POLICY,
                         reinterpret_cast<thread_policy_t>(&policy),

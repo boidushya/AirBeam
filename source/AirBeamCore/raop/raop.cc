@@ -4,14 +4,36 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <stdarg.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
+#include <syslog.h>
 #include <thread>
+
+namespace {
+void airbeam_log(const char* fmt, ...) {
+  FILE* f = fopen("/tmp/airbeam.log", "a");
+  if (!f) return;
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
+  struct tm tm;
+  localtime_r(&tv.tv_sec, &tm);
+  fprintf(f, "%02d:%02d:%02d.%03d ", tm.tm_hour, tm.tm_min, tm.tm_sec,
+          (int)(tv.tv_usec / 1000));
+  va_list args;
+  va_start(args, fmt);
+  vfprintf(f, fmt, args);
+  va_end(args);
+  fprintf(f, "\n");
+  fclose(f);
+}
+}  // namespace
 
 #include "absl/strings/numbers.h"
 #include "constants.h"
@@ -55,38 +77,47 @@ bool Raop::Start() {
 void Raop::AcceptFrame() {
   if (!is_started_) return;
 
+  uint64_t now_ts = NtpTime::Now().IntoTimestamp(kSampleRate44100);
   uint64_t head = status_.head_ts.load(std::memory_order_relaxed);
   uint64_t first = status_.first_ts.load(std::memory_order_relaxed);
-  uint64_t frames_since_start = head - first;
-  double target_ns =
-      static_cast<double>(frames_since_start) * 1'000'000'000.0 /
-      kSampleRate44100;
-  uint64_t target_mach =
-      start_mach_time_ + static_cast<uint64_t>(target_ns * ns_to_mach_);
 
-  uint64_t now = mach_absolute_time();
-
-  if (now < target_mach) {
-    mach_wait_until(target_mach);
-  } else if (now > target_mach +
-                        static_cast<uint64_t>(400'000'000.0 * ns_to_mach_)) {
-    // Extremely far behind (>400ms) — likely system sleep/wake or silence.
-    // Reset to prevent a burst of catch-up packets.
-    start_mach_time_ = now - static_cast<uint64_t>(target_ns * ns_to_mach_);
+  // On the first frame, reinitialize head_ts to current NTP time.
+  // FirstSendSync sets head_ts during RTSP setup, but the consumer thread
+  // doesn't start until ~10-20ms later. Without this, every frame is
+  // permanently late by the startup gap and AcceptFrame never sleeps.
+  if (head == first && now_ts > head + kPCMChunkLength) {
+    status_.head_ts.store(now_ts, std::memory_order_relaxed);
+    status_.first_ts.store(now_ts, std::memory_order_relaxed);
+    head = now_ts;
+    first = now_ts;
+    airbeam_log("INIT: reinit head_ts to now (startup gap absorbed)");
   }
 
-  // Every ~10 seconds, re-anchor start_mach_time_ to NTP time.
-  // This prevents mach/NTP clock drift (~10-100ppm) from accumulating over
-  // extended playback. The correction is at most ~1ms (100ppm * 10s) and
-  // happens infrequently enough to not cause per-frame jitter.
+  uint64_t target = head + kPCMChunkLength;
+
+  if (now_ts < target) {
+    uint64_t wait_frames = target - now_ts;
+    std::this_thread::sleep_for(std::chrono::nanoseconds(
+        wait_frames * 1'000'000'000ULL / kSampleRate44100));
+  } else {
+    uint64_t late_frames = now_ts - target;
+    double late_ms =
+        static_cast<double>(late_frames) * 1000.0 / kSampleRate44100;
+    if (late_ms > 2.0) diag_.late_count++;
+    if (late_ms > diag_.max_late_ms) diag_.max_late_ms = late_ms;
+  }
+
+  diag_.frames_sent++;
+
+  // Every ~30 seconds, log health summary
+  uint64_t frames_since_start = head - first;
   if (frames_since_start > 0 &&
-      frames_since_start % (kSampleRate44100 * 10) < kPCMChunkLength) {
-    uint64_t ntp_now_ts = NtpTime::Now().IntoTimestamp(kSampleRate44100);
-    uint64_t ntp_frames = ntp_now_ts - first;
-    double ntp_ns = static_cast<double>(ntp_frames) * 1'000'000'000.0 /
-                    kSampleRate44100;
-    start_mach_time_ =
-        mach_absolute_time() - static_cast<uint64_t>(ntp_ns * ns_to_mach_);
+      frames_since_start % (kSampleRate44100 * 30) < kPCMChunkLength) {
+    airbeam_log("STATS: sent=%u late=%u(>2ms) max_late=%.1fms "
+               "retransmit=%u send_fail=%u",
+               diag_.frames_sent, diag_.late_count, diag_.max_late_ms,
+               diag_.retransmit_count, diag_.send_failures);
+    diag_ = {};
   }
 }
 
@@ -117,7 +148,7 @@ void Raop::SendPreparedChunk() {
   int ret = audio_server_.WriteTo(resolved_audio_addr_, send_buffer_.data(),
                                   send_buffer_.size());
   if (ret != kOk) {
-    ABDebugLog("audio_server_.Write failed, ret=%d", ret);
+    diag_.send_failures++;
   }
   status_.head_ts.fetch_add(kPCMChunkLength, std::memory_order_relaxed);
 }
@@ -352,6 +383,8 @@ void Raop::RetransmitPackets(uint16_t seq_start, uint16_t count) {
       to_send.push_back({seq, pkt_data});
     }
   }
+
+  diag_.retransmit_count += to_send.size();
 
   for (const auto& entry : to_send) {
     std::string retransmit_pkt;

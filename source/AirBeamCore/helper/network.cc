@@ -42,6 +42,13 @@ ErrCode TCPClient::Connect(const std::string& ip, int port) {
   int nodelay = 1;
   setsockopt(sockfd_, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
+  // 10-second recv timeout prevents keepalive thread from blocking forever
+  // if the HomePod stops responding (half-open connection)
+  struct timeval tv;
+  tv.tv_sec = 10;
+  tv.tv_usec = 0;
+  setsockopt(sockfd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
   if (connect(sockfd_, (sockaddr*)&remote_addr, sizeof(remote_addr)) < 0) {
     ABDebugLog("connect() failed: errno=%d (%s)", errno, strerror(errno));
     return kErrTcpConnect;

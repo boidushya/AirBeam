@@ -63,6 +63,16 @@ class Raop {
   double mach_to_ns_ = 1.0;
   double ns_to_mach_ = 1.0;
 
+  // Diagnostic counters (reset every 30s, logged as summary)
+  struct DiagStats {
+    uint32_t frames_sent = 0;
+    uint32_t late_count = 0;
+    double max_late_ms = 0;
+    uint32_t retransmit_count = 0;
+    uint32_t send_failures = 0;
+    double last_reanchor_ms = 0;
+  } diag_;
+
   std::vector<uint8_t> send_buffer_;
 
   static constexpr size_t kRetransmitBufferSize = 512;

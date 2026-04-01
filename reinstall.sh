@@ -27,4 +27,7 @@ sudo codesign --force --deep -s - "$PLUGIN_DST"
 echo "Restarting coreaudiod..."
 sudo killall coreaudiod
 
+# Add delimiter to diagnostic log so new session is easy to find
+sudo sh -c "echo '' >> /tmp/airbeam.log; echo '========== REINSTALL $(date +%H:%M:%S) ==========' >> /tmp/airbeam.log" 2>/dev/null || true
+
 echo "Done. The AirBeam device should appear in a few seconds."
