@@ -55,27 +55,38 @@ bool Raop::Start() {
 void Raop::AcceptFrame() {
   if (!is_started_) return;
 
-  // Calculate the absolute Mach time when this chunk should be sent, based on
-  // how many frames we've sent since start.
   uint64_t head = status_.head_ts.load(std::memory_order_relaxed);
   uint64_t first = status_.first_ts.load(std::memory_order_relaxed);
   uint64_t frames_since_start = head - first;
   double target_ns =
-      static_cast<double>(frames_since_start) * 1'000'000'000.0 / kSampleRate44100;
-  uint64_t target_mach = start_mach_time_ +
-                         static_cast<uint64_t>(target_ns * ns_to_mach_);
+      static_cast<double>(frames_since_start) * 1'000'000'000.0 /
+      kSampleRate44100;
+  uint64_t target_mach =
+      start_mach_time_ + static_cast<uint64_t>(target_ns * ns_to_mach_);
 
   uint64_t now = mach_absolute_time();
 
   if (now < target_mach) {
-    // Wait with sub-microsecond precision
     mach_wait_until(target_mach);
-  } else if (now > target_mach) {
-    // We're behind schedule. Instead of hard-resetting (which causes clicks),
-    // gradually nudge the clock reference to catch up smoothly.
-    // Correct 5% of the error per chunk — full correction in ~160ms.
-    int64_t error = static_cast<int64_t>(now - target_mach);
-    start_mach_time_ += error / 20;
+  } else if (now > target_mach +
+                        static_cast<uint64_t>(400'000'000.0 * ns_to_mach_)) {
+    // Extremely far behind (>400ms) — likely system sleep/wake or silence.
+    // Reset to prevent a burst of catch-up packets.
+    start_mach_time_ = now - static_cast<uint64_t>(target_ns * ns_to_mach_);
+  }
+
+  // Every ~10 seconds, re-anchor start_mach_time_ to NTP time.
+  // This prevents mach/NTP clock drift (~10-100ppm) from accumulating over
+  // extended playback. The correction is at most ~1ms (100ppm * 10s) and
+  // happens infrequently enough to not cause per-frame jitter.
+  if (frames_since_start > 0 &&
+      frames_since_start % (kSampleRate44100 * 10) < kPCMChunkLength) {
+    uint64_t ntp_now_ts = NtpTime::Now().IntoTimestamp(kSampleRate44100);
+    uint64_t ntp_frames = ntp_now_ts - first;
+    double ntp_ns = static_cast<double>(ntp_frames) * 1'000'000'000.0 /
+                    kSampleRate44100;
+    start_mach_time_ =
+        mach_absolute_time() - static_cast<uint64_t>(ntp_ns * ns_to_mach_);
   }
 }
 
@@ -322,26 +333,38 @@ bool Raop::Record() {
 }
 
 void Raop::RetransmitPackets(uint16_t seq_start, uint16_t count) {
-  std::lock_guard<std::mutex> lock(retransmit_mutex_);
-  for (uint16_t i = 0; i < count; ++i) {
-    uint16_t seq = seq_start + i;
-    const auto& pkt_data =
-        retransmit_buffer_[seq % kRetransmitBufferSize];
-    if (pkt_data.empty()) continue;
+  // Copy packets out while holding the lock, then send outside it.
+  // This prevents the consumer thread (PrepareChunk) from being blocked
+  // during potentially slow UDP sends.
+  struct PendingRetransmit {
+    uint16_t seq;
+    std::string data;
+  };
+  std::vector<PendingRetransmit> to_send;
 
-    // AirPlay retransmit: 4-byte header (0x80, 0xD6, original seq) + original
-    // packet
+  {
+    std::lock_guard<std::mutex> lock(retransmit_mutex_);
+    for (uint16_t i = 0; i < count; ++i) {
+      uint16_t seq = seq_start + i;
+      const auto& pkt_data =
+          retransmit_buffer_[seq % kRetransmitBufferSize];
+      if (pkt_data.empty()) continue;
+      to_send.push_back({seq, pkt_data});
+    }
+  }
+
+  for (const auto& entry : to_send) {
     std::string retransmit_pkt;
-    retransmit_pkt.resize(4 + pkt_data.size());
+    retransmit_pkt.resize(4 + entry.data.size());
     retransmit_pkt[0] = static_cast<char>(0x80);
     retransmit_pkt[1] = static_cast<char>(0xD6);
-    retransmit_pkt[2] = static_cast<char>((seq >> 8) & 0xFF);
-    retransmit_pkt[3] = static_cast<char>(seq & 0xFF);
-    memcpy(&retransmit_pkt[4], pkt_data.data(), pkt_data.size());
+    retransmit_pkt[2] = static_cast<char>((entry.seq >> 8) & 0xFF);
+    retransmit_pkt[3] = static_cast<char>(entry.seq & 0xFF);
+    memcpy(&retransmit_pkt[4], entry.data.data(), entry.data.size());
 
     int ret = ctrl_server_.Write(remote_ctrl_addr_, retransmit_pkt);
     if (ret != kOk) {
-      ABDebugLog("retransmit failed for seq=%u, ret=%d", seq, ret);
+      ABDebugLog("retransmit failed for seq=%u, ret=%d", entry.seq, ret);
     }
   }
 }

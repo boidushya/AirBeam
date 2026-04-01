@@ -181,6 +181,11 @@ RtpSyncPacket RtpSyncPacket::Build(uint64_t timestamp, uint64_t sample_rate,
   pkt.header.proto = 0x80 | (first ? 0x10 : 0x00);
   pkt.header.type = 0x54 | 0x80;
   pkt.header.seq = 7;
+  // Convert head_ts to NTP time mathematically. This guarantees perfect
+  // consistency between rtp_timestamp and curr_time — the same approach used
+  // by libraop (TS2NTP) and other proven RAOP senders. Using NtpTime::Now()
+  // here would introduce jitter from the gap between reading head_ts and
+  // sampling the clock.
   pkt.curr_time = NtpTime::FromTimestamp(timestamp, kSampleRate44100);
 
   pkt.rtp_timestamp = static_cast<uint32_t>(timestamp);
