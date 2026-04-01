@@ -386,6 +386,13 @@ void Raop::RetransmitPackets(uint16_t seq_start, uint16_t count) {
 
   diag_.retransmit_count += to_send.size();
 
+  // Log retransmit bursts — likely audible as crackles.
+  // Only log when >5 packets requested at once (small requests are normal).
+  if (to_send.size() > 5) {
+    airbeam_log("CRACKLE? retransmit burst: %zu packets (seq %u+%u)",
+                to_send.size(), seq_start, count);
+  }
+
   for (const auto& entry : to_send) {
     std::string retransmit_pkt;
     retransmit_pkt.resize(4 + entry.data.size());

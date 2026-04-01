@@ -22,8 +22,7 @@ This fork fixes those bugs and adds convenience tooling (auto-switch script, men
 ### Audio Quality Improvements
 
 - **Bulk FIFO buffer** - replaced byte-by-byte audio buffer (1,408 lock/unlock cycles per chunk) with bulk `memcpy` operations (~1 lock per chunk), reducing mutex contention by ~1000x
-- **Precision timing** - replaced imprecise `sleep_for` (~1ms granularity) with `mach_wait_until` for sub-microsecond packet scheduling, and fixed a bug where the original sleep calculation was ~4.3x too long
-- **NTP clock re-anchoring** - `mach_absolute_time` and NTP wall clock drift at 10-100ppm; every 10 seconds the timing reference is re-anchored to NTP to prevent long-term drift while preserving frame-level precision
+- **NTP-coherent timing** - fixed a bug where the original sleep calculation was ~4.3x too long; pacing now uses NTP time (same clock as sync packets) with `head_ts` reinitialized on first frame to absorb the 10-20ms startup gap
 - **Lost packet retransmission** - HomePod requests for missed packets were silently ignored; now retransmitted from a 512-packet ring buffer
 - **Atomic timestamp access** - fixed a data race between the audio consumer thread and sync thread that caused clicks during idle/silence
 - **Pre-allocated send buffers** - eliminated ~250 heap allocations/sec from the audio hot path
@@ -38,6 +37,7 @@ This fork fixes those bugs and adds convenience tooling (auto-switch script, men
 - **Removed all 18 `exit(-1)` calls** - the original code killed `coreaudiod` on any transient network error (Wi-Fi blip, slow HomePod response). Now startup failures return errors gracefully, background threads retry on transient errors, and the audio hot path logs and continues
 - **Lock-free retransmission** - retransmit packets are copied while holding the mutex, then sent outside it, preventing the consumer thread from stalling during retransmission bursts
 - **Resume recovery** - detects when the stream has been idle for >400ms (system sleep, silence gap) and resets timing to prevent a burst of catch-up packets
+- **Diagnostic logging** - writes periodic health stats (late packets, retransmits, send failures) to `/tmp/airbeam.log` every 30 seconds; logs retransmit bursts that likely correspond to audible crackles
 
 ## Prerequisites
 
