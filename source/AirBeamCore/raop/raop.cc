@@ -81,10 +81,7 @@ void Raop::AcceptFrame() {
   uint64_t head = status_.head_ts.load(std::memory_order_relaxed);
   uint64_t first = status_.first_ts.load(std::memory_order_relaxed);
 
-  // On the first frame, reinitialize head_ts to current NTP time.
-  // FirstSendSync sets head_ts during RTSP setup, but the consumer thread
-  // doesn't start until ~10-20ms later. Without this, every frame is
-  // permanently late by the startup gap and AcceptFrame never sleeps.
+  // Reinit head_ts on first frame to absorb the 10-20ms startup gap.
   if (head == first && now_ts > head + kPCMChunkLength) {
     status_.head_ts.store(now_ts, std::memory_order_relaxed);
     status_.first_ts.store(now_ts, std::memory_order_relaxed);
@@ -114,9 +111,10 @@ void Raop::AcceptFrame() {
   if (frames_since_start > 0 &&
       frames_since_start % (kSampleRate44100 * 30) < kPCMChunkLength) {
     airbeam_log("STATS: sent=%u late=%u(>2ms) max_late=%.1fms "
-               "retransmit=%u send_fail=%u",
+               "retransmit=%u send_fail=%u crackles=%u",
                diag_.frames_sent, diag_.late_count, diag_.max_late_ms,
-               diag_.retransmit_count, diag_.send_failures);
+               diag_.retransmit_count, diag_.send_failures,
+               diag_.crackle_count);
     diag_ = {};
   }
 }
@@ -138,8 +136,9 @@ void Raop::PrepareChunk(const RtpAudioPacketChunk& chunk) {
   {
     std::lock_guard<std::mutex> lock(retransmit_mutex_);
     auto& slot = retransmit_buffer_[status_.seq_number % kRetransmitBufferSize];
-    slot.assign(reinterpret_cast<const char*>(send_buffer_.data()),
-                send_buffer_.size());
+    slot.seq = status_.seq_number;
+    slot.data.assign(reinterpret_cast<const char*>(send_buffer_.data()),
+                     send_buffer_.size());
   }
 }
 
@@ -377,20 +376,32 @@ void Raop::RetransmitPackets(uint16_t seq_start, uint16_t count) {
     std::lock_guard<std::mutex> lock(retransmit_mutex_);
     for (uint16_t i = 0; i < count; ++i) {
       uint16_t seq = seq_start + i;
-      const auto& pkt_data =
+      const auto& entry =
           retransmit_buffer_[seq % kRetransmitBufferSize];
-      if (pkt_data.empty()) continue;
-      to_send.push_back({seq, pkt_data});
+      // Only retransmit if the buffer slot still holds the requested packet.
+      // If it's been overwritten (seq mismatch), skip — sending the wrong
+      // packet causes the HomePod to re-request endlessly.
+      if (entry.data.empty() || entry.seq != seq) continue;
+      to_send.push_back({seq, entry.data});
     }
   }
 
   diag_.retransmit_count += to_send.size();
 
-  // Log retransmit bursts — likely audible as crackles.
-  // Only log when >5 packets requested at once (small requests are normal).
-  if (to_send.size() > 5) {
-    airbeam_log("CRACKLE? retransmit burst: %zu packets (seq %u+%u)",
-                to_send.size(), seq_start, count);
+  // Track retransmit rate in a rolling 1-second window.
+  // When rate exceeds 20 retransmits/sec, log as a likely crackle.
+  // This catches both big bursts and clusters of small requests.
+  {
+    uint64_t now_ntp = NtpTime::Now().IntoTimestamp(kSampleRate44100);
+    if (now_ntp - diag_.retransmit_window_start > kSampleRate44100) {
+      // New 1-second window
+      if (diag_.retransmit_window_count > 20) {
+        diag_.crackle_count++;
+      }
+      diag_.retransmit_window_count = 0;
+      diag_.retransmit_window_start = now_ntp;
+    }
+    diag_.retransmit_window_count += to_send.size();
   }
 
   for (const auto& entry : to_send) {
@@ -438,7 +449,7 @@ void Raop::SyncStart() {
       memcpy(data.data(), buffer, sizeof(RtpSyncPacket));
       int ret = ctrl_server_.Write(remote_ctrl_addr_, data);
       if (ret != kOk) {
-        ABDebugLog("ctrl_server_.Write failed, ret=%d", ret);
+        airbeam_log("SYNC FAILED: ret=%d", ret);
       }
       std::this_thread::sleep_for(std::chrono::seconds(1));
     }
@@ -461,7 +472,7 @@ void Raop::KeepAlive() {
       RtspRespMessage response;
       int ret = rtsp_client_.DoRequest(request, response);
       if (ret != kOk) {
-        ABDebugLog("KeepAlive: rtsp_client_.DoRequest failed, ret=%d", ret);
+        airbeam_log("KEEPALIVE FAILED: ret=%d", ret);
       }
     }
   }))->detach();

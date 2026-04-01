@@ -15,6 +15,8 @@
 #include <mach/mach_time.h>
 #include <mach/thread_policy.h>
 #include <pthread.h>
+#include <stdarg.h>
+#include <sys/time.h>
 #include <syslog.h>
 
 #include <chrono>
@@ -34,6 +36,23 @@
 #include "raop/raop.h"
 
 namespace {
+
+void airbeam_log(const char* fmt, ...) {
+  FILE* f = fopen("/tmp/airbeam.log", "a");
+  if (!f) return;
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
+  struct tm tm;
+  localtime_r(&tv.tv_sec, &tm);
+  fprintf(f, "%02d:%02d:%02d.%03d ", tm.tm_hour, tm.tm_min, tm.tm_sec,
+          (int)(tv.tv_usec / 1000));
+  va_list args;
+  va_start(args, fmt);
+  vfprintf(f, fmt, args);
+  va_end(args);
+  fprintf(f, "\n");
+  fclose(f);
+}
 
 using namespace AirBeamCore::raop;
 using namespace AirBeamCore::helper;
@@ -94,17 +113,18 @@ class RaopHandler : public aspl::ControlRequestHandler,
 
     raop_->Start();
     consumer_thread_ = std::make_unique<std::thread>([&]() {
-      // Real-time constraint with accurate budget. The FIFO read blocks
-      // (off-CPU, doesn't count as computation). Actual on-CPU work per
-      // chunk is ~200μs (encode + serialize + send).
+      // Real-time constraint: declare 2ms of CPU needed within a 4ms window,
+      // every 8ms period. The FIFO read blocks off-CPU (doesn't count).
+      // Using computation=period starves other threads (keepalive, sync)
+      // and causes disconnects.
       mach_timebase_info_data_t timebase;
       mach_timebase_info(&timebase);
       uint32_t chunk_ns = 352 * 1'000'000'000U / SampleRate;  // ~8ms
       uint32_t chunk_abs = chunk_ns * timebase.denom / timebase.numer;
       thread_time_constraint_policy_data_t policy;
-      policy.period = chunk_abs;          // 8ms period
-      policy.computation = chunk_abs;     // allow full period on-CPU
-      policy.constraint = chunk_abs;      // same as period
+      policy.period = chunk_abs;              // 8ms period
+      policy.computation = chunk_abs / 4;     // 2ms CPU budget
+      policy.constraint = chunk_abs / 2;      // 4ms deadline
       policy.preemptible = 1;
       thread_policy_set(mach_thread_self(), THREAD_TIME_CONSTRAINT_POLICY,
                         reinterpret_cast<thread_policy_t>(&policy),
@@ -190,6 +210,13 @@ class DriverHelper {
       ABDebugLog("service online %s %s %s %lu", service_info.fullname.c_str(),
                  service_info.name.c_str(), service_info.ip.c_str(),
                  service_info.port);
+      // Cancel any pending removal — the service came back before the
+      // grace period expired. This is the common case for WiFi flaps.
+      auto pending = pending_removals_.find(service_info.fullname);
+      if (pending != pending_removals_.end()) {
+        pending_removals_.erase(pending);
+        airbeam_log("FLAP ABSORBED: %s came back online", service_info.fullname.c_str());
+      }
       auto it = devices_mapping_.find(service_info.fullname);
       if (it != devices_mapping_.end()) {
         if (it->second.service_info_ == service_info) {
@@ -208,8 +235,25 @@ class DriverHelper {
 
     if (event_type == BonjourBrowse::EventType::kServiceOffline) {
       ABDebugLog("kServiceOffline %s", service_info.fullname.c_str());
-      RemoveDevice(service_info);
-      ABDebugLog("device %s removed", service_info.fullname.c_str());
+      // Don't remove immediately — Bonjour flaps on WiFi when mDNS packets
+      // are lost. Wait 10 seconds; if the service doesn't come back online,
+      // then remove it. This prevents the music app from seeing the device
+      // vanish during brief network hiccups.
+      auto fullname = service_info.fullname;
+      pending_removals_[fullname] = std::chrono::steady_clock::now();
+      (new std::thread([this, fullname, service_info]() {
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+        std::lock_guard<std::mutex> guard(device_mapping_mutex_);
+        auto it = pending_removals_.find(fullname);
+        if (it != pending_removals_.end()) {
+          // Still pending after 10s — actually remove
+          pending_removals_.erase(it);
+          if (devices_mapping_.find(fullname) != devices_mapping_.end()) {
+            RemoveDevice(service_info);
+            airbeam_log("DEVICE REMOVED: %s (offline >10s)", fullname.c_str());
+          }
+        }
+      }))->detach();
       return;
     }
   }
@@ -243,6 +287,7 @@ class DriverHelper {
   std::shared_ptr<aspl::Plugin> plugin_;
   std::shared_ptr<aspl::Driver> driver_;
   std::map<std::string, DeviceInfo> devices_mapping_;
+  std::map<std::string, std::chrono::steady_clock::time_point> pending_removals_;
   std::mutex device_mapping_mutex_;
   BonjourBrowse browse_;
 };

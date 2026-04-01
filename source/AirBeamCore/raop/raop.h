@@ -70,13 +70,20 @@ class Raop {
     double max_late_ms = 0;
     uint32_t retransmit_count = 0;
     uint32_t send_failures = 0;
-    double last_reanchor_ms = 0;
+    uint32_t crackle_count = 0;
+    // Rolling 1-second window for retransmit rate spike detection
+    uint32_t retransmit_window_count = 0;
+    uint64_t retransmit_window_start = 0;  // NTP timestamp
   } diag_;
 
   std::vector<uint8_t> send_buffer_;
 
   static constexpr size_t kRetransmitBufferSize = 512;
-  std::array<std::string, kRetransmitBufferSize> retransmit_buffer_;
+  struct RetransmitEntry {
+    uint16_t seq = 0;
+    std::string data;
+  };
+  std::array<RetransmitEntry, kRetransmitBufferSize> retransmit_buffer_;
   std::mutex retransmit_mutex_;
 
  public:
