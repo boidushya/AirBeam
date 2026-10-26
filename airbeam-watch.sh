@@ -8,11 +8,11 @@
 # Run `SwitchAudioSource -a` to see all available device names.
 # Set DEVICE to your AirBeam virtual output device name.
 # Add any device you'd intentionally switch to in INTENTIONAL — the script won't override those.
-DEVICE="D6D63AF4F8EF@Bedroom"
+DEVICE="2E90A42B488C@Bedroom"
 INTERVAL=5
 
 INTENTIONAL=(
-  "D6D63AF4F8EF@Bedroom"
+  "2E90A42B488C@Bedroom"
   "Boidushya's AirPods Pro"
   "Bedroom"
   "BlackHole 2ch"
