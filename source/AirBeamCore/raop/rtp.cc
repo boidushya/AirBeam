@@ -122,7 +122,7 @@ uint64_t NtpTime::IntoTimestamp(uint64_t sample_rate) const {
 }
 
 NtpTime NtpTime::FromTimestamp(uint64_t ts, uint64_t sample_rate) {
-  uint64_t ntp = (ts << 16) / (sample_rate << 16);
+  uint64_t ntp = ((ts << 16) / sample_rate) << 16;
   NtpTime result;
 
   result.seconds = static_cast<uint32_t>((ntp >> 32));

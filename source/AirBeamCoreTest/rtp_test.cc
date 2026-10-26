@@ -32,14 +32,27 @@ TEST(NtpTimeTest, NowAndToString) {
   EXPECT_FALSE(s.empty());
 }
 
-// TODO(cattchen) fix test
-// TEST(NtpTimeTest, FromAndIntoTimestamp) {
-//   uint64_t ts = 44100 * 10;
-//   uint64_t sr = 44100;
-//   NtpTime ntp = NtpTime::FromTimestamp(ts, sr);
-//   uint64_t ts2 = ntp.IntoTimestamp(sr);
-//   EXPECT_NEAR(ts, ts2, 2);
-// }
+TEST(NtpTimeTest, FromTimestampWholeSeconds) {
+  NtpTime ntp = NtpTime::FromTimestamp(44100 * 10, 44100);
+  EXPECT_EQ(ntp.seconds, 10u);
+  EXPECT_EQ(ntp.fraction, 0u);
+}
+
+TEST(NtpTimeTest, FromTimestampHalfSecond) {
+  NtpTime ntp = NtpTime::FromTimestamp(44100 * 10 + 22050, 44100);
+  EXPECT_EQ(ntp.seconds, 10u);
+  EXPECT_NEAR(ntp.fraction, 0x80000000u, 1u << 16);
+}
+
+TEST(NtpTimeTest, RoundTripsCurrentTime) {
+  NtpTime now = NtpTime::Now();
+  NtpTime back =
+      NtpTime::FromTimestamp(now.IntoTimestamp(44100), 44100);
+  uint64_t now_ntp = (uint64_t{now.seconds} << 32) | now.fraction;
+  uint64_t back_ntp = (uint64_t{back.seconds} << 32) | back.fraction;
+  ASSERT_LE(back_ntp, now_ntp);
+  EXPECT_LE(now_ntp - back_ntp, (uint64_t{1} << 32) / 44100 + (2 << 16));
+}
 
 TEST(RtpTimePacketTest, SerializeDeserialize) {
   RtpTimePacket pkt;
